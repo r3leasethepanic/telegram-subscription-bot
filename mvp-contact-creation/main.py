@@ -62,8 +62,7 @@ async def process_name(message: types.Message, state: FSMContext):
     await state.finish()
 
     try:
-        result = gc_create_contact(email, full_name)
-        contact_uuid = result.get("uuid") or result.get("contact_uuid")
+        user_id = gc_import_user(email, full_name)
         cursor.execute(
             "INSERT OR REPLACE INTO users (tg_id, email, full_name, gc_uuid) VALUES (?, ?, ?, ?)",
             (message.from_user.id, email, full_name, contact_uuid)
