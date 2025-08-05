@@ -11,20 +11,22 @@ from aiogram.utils import executor
 
 from getcourse_api import gc_import_user
 
-# === Настройка ===
+# ========== Настройка ==========
 load_dotenv()
 API_TOKEN = os.getenv("TG_TOKEN")
+if not API_TOKEN:
+    raise RuntimeError("TG_TOKEN is not set in .env")
 
-# Логи
+# ========== Логирование ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация бота
+# ========== Инициализация бота ==========
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# === База данных ===
+# ========== База данных ==========
 DB_PATH = "bot.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -38,12 +40,12 @@ CREATE TABLE IF NOT EXISTS users (
 """)
 conn.commit()
 
-# === Состояния FSM ===
+# ========== FSM-состояния ==========
 class SubscriptionStates(StatesGroup):
     waiting_for_email = State()
     waiting_for_name  = State()
 
-# === Хендлеры ===
+# ========== Хендлеры ==========
 @dp.message_handler(commands=["start", "subscribe"])
 async def cmd_subscribe(message: types.Message):
     await SubscriptionStates.waiting_for_email.set()
@@ -67,10 +69,8 @@ async def process_name(message: types.Message, state: FSMContext):
     await state.finish()
 
     try:
-        # Создаём пользователя через Import API и получаем user_id
         user_id = gc_import_user(email, full_name)
 
-        # Сохраняем в локальную БД
         cursor.execute(
             "INSERT OR REPLACE INTO users (tg_id, email, full_name, gc_user_id) VALUES (?, ?, ?, ?)",
             (message.from_user.id, email, full_name, user_id)
@@ -82,6 +82,7 @@ async def process_name(message: types.Message, state: FSMContext):
         logger.error(f"Error importing user to GetCourse: {e}")
         await message.reply("❌ Не удалось создать пользователя. Попробуйте позже.")
 
-# === Запуск ===
+# ========== Запуск ==========
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
+
