@@ -1,6 +1,0 @@
-fastapi
-uvicorn[standard]
-aiogram
-requests
-python-dotenv
-sqlalchemy
