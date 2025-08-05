@@ -12,24 +12,23 @@ API_KEY   = os.getenv("GETCOURSE_API_KEY")  # ваш секретный ключ
 
 def gc_import_user(email: str, full_name: str) -> str:
     """
-    Создаёт (или только добавляет) пользователя в GetCourse через Import API.
-    Возвращает его внутренний user_id.
+    Создаёт пользователя через Import API /pl/api/users.
+    Возвращает его внутренний user_id из GetCourse.
     """
     url = f"https://{GC_DOMAIN}/pl/api/users"
 
-    # Формируем тело запроса
-    payload_obj = {
+    # Подготовим тело для base64
+    payload = {
         "user": {
             "email": email,
             "last_name": full_name
         },
         "system": {
-            "refresh_if_exists": 0  # 0 — не обновлять, если существует; 1 — обновлять
+            "refresh_if_exists": 0
         }
     }
-    # Параметр params — это base64 от JSON-строки
     params_b64 = base64.b64encode(
-        json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")
     ).decode("utf-8")
 
     data = {
@@ -48,5 +47,5 @@ def gc_import_user(email: str, full_name: str) -> str:
         logging.error(f"GetCourse Import API error response: {result}")
         raise Exception(f"GC import error: {result}")
 
-    # Возвращаем строковый ID пользователя
     return str(result["result"]["user_id"])
+
