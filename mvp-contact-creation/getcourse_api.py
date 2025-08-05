@@ -1,36 +1,33 @@
 import os
 import json
 import base64
+import logging
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-GC_DOMAIN = os.getenv("GC_DOMAIN")          # ваш аккаунт, например "idc-education.getcourse.ru"
+GC_DOMAIN = os.getenv("GC_DOMAIN")          # например "idc-education.getcourse.ru"
 API_KEY   = os.getenv("GETCOURSE_API_KEY")  # ваш секретный ключ
 
 def gc_import_user(email: str, full_name: str) -> str:
     """
-    Создаёт (или обновляет, если refresh_if_exists=1) пользователя в GetCourse
-    через Import API и возвращает его ID.
+    Создаёт (или только добавляет) пользователя в GetCourse через Import API.
+    Возвращает его внутренний user_id.
     """
     url = f"https://{GC_DOMAIN}/pl/api/users"
-    
-    # Сформируем тело запроса:
+
+    # Формируем тело запроса
     payload_obj = {
         "user": {
             "email": email,
-            "last_name": full_name,
-            # опционально first_name, phone, city и т.д.
+            "last_name": full_name
         },
         "system": {
-            "refresh_if_exists": 0  # 1 — обновлять существующего, 0 — только новый
-        },
-        "session": {
-            # здесь UTM или gcpc, не обязательно
+            "refresh_if_exists": 0  # 0 — не обновлять, если существует; 1 — обновлять
         }
     }
-    # Параметр params — это base64 от JSON-строки:
+    # Параметр params — это base64 от JSON-строки
     params_b64 = base64.b64encode(
         json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
     ).decode("utf-8")
@@ -42,12 +39,14 @@ def gc_import_user(email: str, full_name: str) -> str:
     }
 
     resp = requests.post(url, data=data)
+    if resp.status_code != 200:
+        logging.error(f"GetCourse Import API HTTP {resp.status_code}: {resp.text}")
     resp.raise_for_status()
+
     result = resp.json()
-
-    # Проверяем успех
     if result.get("success") != "true":
-        raise Exception(f"Ошибка импорта в GetCourse: {result}")
+        logging.error(f"GetCourse Import API error response: {result}")
+        raise Exception(f"GC import error: {result}")
 
-    # ID созданного/существующего пользователя
-    return result["result"]["user_id"]
+    # Возвращаем строковый ID пользователя
+    return str(result["result"]["user_id"])
