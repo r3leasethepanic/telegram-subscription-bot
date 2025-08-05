@@ -17,7 +17,6 @@ def gc_import_user(email: str, full_name: str) -> str:
     """
     url = f"https://{GC_DOMAIN}/pl/api/users"
 
-    # Подготовим тело для base64
     payload = {
         "user": {
             "email": email,
@@ -42,10 +41,12 @@ def gc_import_user(email: str, full_name: str) -> str:
         logging.error(f"GetCourse Import API HTTP {resp.status_code}: {resp.text}")
     resp.raise_for_status()
 
-    result = resp.json()
-    if result.get("success") != "true":
-        logging.error(f"GetCourse Import API error response: {result}")
-        raise Exception(f"GC import error: {result}")
+    resp_json = resp.json()
+    result = resp_json.get("result", {})
 
-    return str(result["result"]["user_id"])
+    # Проверяем булево поле success внутри result
+    if not result.get("success", False):
+        logging.error(f"GetCourse Import API returned error: {resp_json}")
+        raise Exception(f"GC import error: {resp_json}")
 
+    return str(result.get("user_id"))
