@@ -1,10 +1,10 @@
-
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Command
 from aiogram.dispatcher import Dispatcher
 from states import Form
 from utils import is_valid_email, is_valid_phone
+from getcourse import add_user  # ✅ добавили импорт GC
 
 async def start_command(message: types.Message):
     await message.answer("Добро пожаловать! Давайте начнем оформление подписки. Введите ваш email:")
@@ -32,17 +32,28 @@ async def process_city(message: types.Message, state: FSMContext):
     await state.update_data(city=message.text)
     data = await state.get_data()
     username = message.from_user.username or "Не указан"
-    result = (
-        f"📝 Ваши данные:
 
-"
-        f"📧 Email: {data['email']}
-"
-        f"📞 Телефон: {data['phone']}
-"
-        f"🌆 Город: {data['city']}
-"
-        f"👤 Telegram: @{username}"
+    # 🧩 отправляем данные в GetCourse
+    gc_response = add_user(
+        email=data['email'],
+        phone=data['phone'],
+        first_name=username,
+        city=data['city']
+    )
+
+    # 🧩 Ответ пользователю
+    if gc_response.get("success"):
+        await message.answer("✅ Вы успешно зарегистрированы в системе GetCourse.")
+    else:
+        await message.answer("⚠️ Произошла ошибка при регистрации в GetCourse.")
+
+    # 📋 Вывод всех данных
+    result = (
+        f"📝 Ваши данные:\n\n"
+        f"📧 Email: {data['email']}\n"
+        f"📞 Телефон: {data['phone']}\n"
+        f"🌇 Город: {data['city']}\n"
+        f"🧍 Telegram: @{username}"
     )
     await message.answer(result)
     await state.finish()
