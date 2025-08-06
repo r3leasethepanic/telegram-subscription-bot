@@ -1,5 +1,9 @@
-import os, sqlite3, logging
+import os
+import sqlite3
+import logging
+import asyncio
 from dotenv import load_dotenv
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -8,54 +12,67 @@ from aiogram.utils import executor
 
 from getcourse_api import gc_import_user, gc_get_contact_uuid, gc_create_order
 
+# ─── Настройка и логирование ──────────────────────────────────────────────
 load_dotenv()
 TG_TOKEN    = os.getenv("TG_TOKEN")
 COURSE_UUID = os.getenv("COURSE_UUID")
-RECURRENT   = os.getenv("RECURRENT","false").lower() == "true"
+RECURRENT   = os.getenv("RECURRENT", "false").lower() == "true"
 
 if not (TG_TOKEN and COURSE_UUID):
-    raise RuntimeError("TG_TOKEN и COURSE_UUID обязательны в .env")
+    raise RuntimeError("В .env должны быть TG_TOKEN и COURSE_UUID")
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s:%(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
 
+# ─── Инициализация бота и диспетчера ──────────────────────────────────────
 bot = Bot(token=TG_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# Инициализация БД
+# ─── Инициализация БД ────────────────────────────────────────────────────
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
-  tg_id      INTEGER PRIMARY KEY,
-  email      TEXT,
-  full_name  TEXT,
-  contact_uuid TEXT
+    tg_id        INTEGER PRIMARY KEY,
+    email        TEXT,
+    full_name    TEXT,
+    contact_uuid TEXT
 )
 """)
 conn.commit()
 
-class States(StatesGroup):
-    email = State()
-    name  = State()
+# ─── Callback перед стартом polling ───────────────────────────────────────
+async def on_startup(dp):
+    # Удаляем Webhook, чтобы избежать конфликта с getUpdates
+    await bot.delete_webhook()
+    logger.info("Webhook deleted, polling will start")
 
-@dp.message_handler(commands=["start","subscribe"])
-async def start(message: types.Message):
-    await States.email.set()
-    await message.reply("Введите e-mail:")
+# ─── FSM-состояния ───────────────────────────────────────────────────────
+class SubscriptionStates(StatesGroup):
+    waiting_for_email = State()
+    waiting_for_name  = State()
 
-@dp.message_handler(state=States.email)
-async def email_handler(message: types.Message, state: FSMContext):
+# ─── Хендлеры ─────────────────────────────────────────────────────────────
+@dp.message_handler(commands=["start", "subscribe"])
+async def cmd_subscribe(message: types.Message):
+    await SubscriptionStates.waiting_for_email.set()
+    await message.reply("👋 Введите ваш e-mail для подписки:")
+
+@dp.message_handler(state=SubscriptionStates.waiting_for_email)
+async def process_email(message: types.Message, state: FSMContext):
     email = message.text.strip()
-    if "@" not in email:
-        return await message.reply("Неверный e-mail, попробуйте снова:")
+    if "@" not in email or "." not in email:
+        return await message.reply("❗ Неверный формат e-mail, попробуйте снова:")
     await state.update_data(email=email)
-    await States.next()
-    await message.reply("Теперь ФИО:")
+    await SubscriptionStates.next()
+    await message.reply("Теперь укажите ФИО (например: Иван Иванов):")
 
-@dp.message_handler(state=States.name)
-async def name_handler(message: types.Message, state: FSMContext):
+@dp.message_handler(state=SubscriptionStates.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
     full_name = message.text.strip()
     data = await state.get_data()
     email = data["email"]
@@ -64,27 +81,30 @@ async def name_handler(message: types.Message, state: FSMContext):
     try:
         # 1) Импорт/обновление пользователя
         gc_import_user(email, full_name)
-        # 2) Поиск его contact_uuid
-        uuid = gc_get_contact_uuid(email)
-        # 3) Сохранение локально
+
+        # 2) Получаем UUID созданного контакта
+        contact_uuid = gc_get_contact_uuid(email)
+
+        # 3) Сохраняем локально
         cursor.execute(
-            "INSERT OR REPLACE INTO users (tg_id,email,full_name,contact_uuid) VALUES(?,?,?,?)",
-            (message.from_user.id, email, full_name, uuid)
+            "INSERT OR REPLACE INTO users (tg_id,email,full_name,contact_uuid) VALUES (?,?,?,?)",
+            (message.from_user.id, email, full_name, contact_uuid)
         )
         conn.commit()
-        # 4) Оформление заказа
-        link = gc_create_order(uuid, COURSE_UUID, RECURRENT)
-        # 5) Ответ пользователю
-        await message.reply(f"Регистрация успешна! Оплатить → {link}")
-    except Exception as e:
-        logger.error(f"Subscription error: {e}")
-        await message.reply("Не удалось оформить подписку, попробуйте позже.")
-        
-async def on_startup(dp):
-    # Удаляем все Webhook-методы, чтобы избежать конфликта с Polling
-    await bot.delete_webhook()
 
+        # 4) Оформляем заказ и получаем ссылку
+        payment_link = gc_create_order(contact_uuid, COURSE_UUID, RECURRENT)
+
+        # 5) Отправляем ссылку пользователю
+        await message.reply(
+            "✅ Подписка оформлена!\n"
+            f"Перейдите по ссылке для оплаты:\n{payment_link}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка оформления подписки: {e}")
+        await message.reply("❌ Не удалось оформить подписку. Попробуйте позже.")
+
+# ─── Запуск Polling ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
-
-
+`
