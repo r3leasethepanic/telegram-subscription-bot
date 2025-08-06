@@ -7,13 +7,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 GC_DOMAIN = os.getenv("GC_DOMAIN")          # Например "idc-education.getcourse.ru"
-API_KEY   = os.getenv("GETCOURSE_API_KEY")  # Ваш секретный ключ GetCourse
-
+API_KEY   = os.getenv("GETCOURSE_API_KEY")  # Ваш секретный ключ
 
 def gc_import_user(email: str, full_name: str) -> None:
     """
-    Создает или обновляет пользователя через Import API (/pl/api/users).
-    Бросает исключение только при HTTP-коде != 200.
+    Пытается импортировать пользователя, но **не кидает** ошибок дальше.
     """
     url = f"https://{GC_DOMAIN}/pl/api/users"
     payload = {
@@ -24,65 +22,49 @@ def gc_import_user(email: str, full_name: str) -> None:
         json.dumps(payload, ensure_ascii=False).encode("utf-8")
     ).decode("utf-8")
 
-    response = requests.post(
-        url,
-        data={
-            "action": "add",
-            "key": API_KEY,
-            "params": params_b64
-        }
-    )
-    response.raise_for_status()
-    logging.info(f"[ImportUser] HTTP {response.status_code}, response: {response.json()}")
-
+    try:
+        resp = requests.post(
+            url,
+            data={"action": "add", "key": API_KEY, "params": params_b64}
+        )
+        resp.raise_for_status()
+        logging.info(f"[ImportUser] OK HTTP {resp.status_code}: {resp.json()}")
+    except Exception as e:
+        # просто логируем и **не** бросаем дальше
+        logging.warning(f"[ImportUser] failed but ignoring: {e}")
 
 def gc_get_contact_uuid(email: str) -> str:
-    """
-    Ищет контакт в GetCourse по e-mail и возвращает его UUID.
-    Бросает исключение, если контакт не найден или нет поля uuid.
-    """
     url = f"https://{GC_DOMAIN}/pl/api/contact.search"
-    headers = {"X-API-KEY": API_KEY}
-    params = {"email": email}
+    try:
+        resp = requests.get(url, params={"email": email}, headers={"X-API-KEY": API_KEY})
+        resp.raise_for_status()
+        data = resp.json()
+        logging.info(f"[GetContactUUID] response: {data}")
+        contacts = data.get("response") or data.get("contacts") or []
+        if not contacts:
+            raise Exception("no contacts")
+        uuid = contacts[0].get("uuid")
+        if not uuid:
+            raise Exception("uuid missing")
+        return uuid
+    except Exception as e:
+        logging.error(f"[GetContactUUID] error: {e}")
+        raise
 
-    response = requests.get(url, params=params, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-    logging.info(f"[GetContactUUID] response: {data}")
-
-    contacts = data.get("response") or data.get("contacts") or []
-    if not contacts:
-        raise Exception(f"No contacts found for email={email}: {data}")
-
-    uuid = contacts[0].get("uuid")
-    if not uuid:
-        raise Exception(f"Contact entry has no uuid: {contacts[0]}")
-
-    return uuid
-
-
-def gc_create_order(contact_uuid: str, course_uuid: str, recurrent: bool = False) -> str:
-    """
-    Создает заказ через Operational API (/pl/api/order.add) и возвращает ссылку на оплату.
-    Бросает исключение при ошибке HTTP или отсутствии payment_link.
-    """
+def gc_create_order(contact_uuid: str, course_uuid: str, recurrent: bool=False) -> str:
     url = f"https://{GC_DOMAIN}/pl/api/order.add"
-    headers = {"X-API-KEY": API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "course_uuid": course_uuid,
-        "contact_uuid": contact_uuid,
-        "recurrent": recurrent
-    }
-
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-    logging.info(f"[CreateOrder] response: {data}")
-
-    link = data.get("order", {}).get("payment_link")
-    if not link:
-        raise Exception(f"Payment link missing in response: {data}")
-
-    return link
+    payload = {"course_uuid": course_uuid, "contact_uuid": contact_uuid, "recurrent": recurrent}
+    try:
+        resp = requests.post(url, json=payload, headers={"X-API-KEY": API_KEY})
+        resp.raise_for_status()
+        data = resp.json()
+        logging.info(f"[CreateOrder] response: {data}")
+        link = data.get("order", {}).get("payment_link")
+        if not link:
+            raise Exception("link missing")
+        return link
+    except Exception as e:
+        logging.error(f"[CreateOrder] error: {e}")
+        raise
 
 
