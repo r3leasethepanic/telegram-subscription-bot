@@ -1,85 +1,110 @@
 import os
-import json
-import base64
+import sqlite3
 import logging
-import requests
+import asyncio
 from dotenv import load_dotenv
 
-# Загружаем конфигурацию из .env
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.utils import executor
+
+from getcourse_api import gc_import_user, gc_get_contact_uuid, gc_create_order
+
+# ─── Загрузка конфигурации ─────────────────────────────────────────────────
 load_dotenv()
-GC_DOMAIN = os.getenv("GC_DOMAIN")          # Например "idc-education.getcourse.ru"
-API_KEY   = os.getenv("GETCOURSE_API_KEY")  # Ваш секретный ключ GetCourse
+TG_TOKEN    = os.getenv("TG_TOKEN")
+COURSE_UUID = os.getenv("COURSE_UUID")
+RECURRENT   = os.getenv("RECURRENT", "false").lower() == "true"
 
+if not (TG_TOKEN and COURSE_UUID):
+    raise RuntimeError("В .env должны быть TG_TOKEN и COURSE_UUID")
 
-def gc_import_user(email: str, full_name: str) -> None:
-    """
-    Пытаемся импортировать пользователя через Import API (/pl/api/users).
-    Любые ошибки логируем, но не останавливаем выполнение.
-    """
-    url = f"https://{GC_DOMAIN}/pl/api/users"
-    payload = {
-        "user": {"email": email, "last_name": full_name},
-        "system": {"refresh_if_exists": 0}
-    }
-    params_b64 = base64.b64encode(
-        json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    ).decode("utf-8")
+# ─── Логирование ───────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s:%(name)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ─── Инициализация бота и диспетчера ───────────────────────────────────────
+bot = Bot(token=TG_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
+
+# ─── Инициализация БД ───────────────────────────────────────────────────────
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    tg_id        INTEGER PRIMARY KEY,
+    email        TEXT,
+    full_name    TEXT,
+    contact_uuid TEXT
+)
+""")
+conn.commit()
+
+# ─── FSM-состояния ─────────────────────────────────────────────────────────
+class SubscriptionStates(StatesGroup):
+    waiting_for_email = State()
+    waiting_for_name  = State()
+
+# ─── On startup: удаляем Webhook и очищаем getUpdates ───────────────────────
+async def on_startup(dp: Dispatcher):
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.get_updates(offset=-1)
+    logger.info("Webhook removed and pending updates cleared")
+
+# ─── Хендлеры ───────────────────────────────────────────────────────────────
+@dp.message_handler(commands=["start", "subscribe"])
+async def cmd_subscribe(message: types.Message):
+    await SubscriptionStates.waiting_for_email.set()
+    await message.reply("👋 Введите ваш e-mail для подписки:")
+
+@dp.message_handler(state=SubscriptionStates.waiting_for_email)
+async def process_email(message: types.Message, state: FSMContext):
+    email = message.text.strip()
+    if "@" not in email or "." not in email:
+        return await message.reply("❗ Неверный формат e-mail. Попробуйте ещё раз:")
+    await state.update_data(email=email)
+    await SubscriptionStates.next()
+    await message.reply("Теперь укажите ФИО (например: Иван Иванов):")
+
+@dp.message_handler(state=SubscriptionStates.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    full_name = message.text.strip()
+    data = await state.get_data()
+    email = data.get("email")
+    await state.finish()
+
+    # 1) Пытаемся импортировать пользователя, но не останавливаемся при ошибках
+    try:
+        gc_import_user(email, full_name)
+    except Exception as e:
+        logger.warning(f"ImportUser failed: {e}")
 
     try:
-        response = requests.post(
-            url,
-            data={
-                "action": "add",
-                "key": API_KEY,
-                "params": params_b64
-            }
+        # 2) Получаем UUID контакта
+        contact_uuid = gc_get_contact_uuid(email)
+        # 3) Сохраняем в локальную БД
+        cursor.execute(
+            "INSERT OR REPLACE INTO users (tg_id,email,full_name,contact_uuid) VALUES (?,?,?,?)",
+            (message.from_user.id, email, full_name, contact_uuid)
         )
-        response.raise_for_status()
-        logging.info(f"[ImportUser] OK HTTP {response.status_code}: {response.json()}")
+        conn.commit()
+
+        # 4) Оформляем заказ
+        payment_link = gc_create_order(contact_uuid, COURSE_UUID, RECURRENT)
+        # 5) Отправляем ссылку
+        await message.reply(
+            f"✅ Подписка оформлена! Перейдите по ссылке для оплаты:\n{payment_link}"
+        )
     except Exception as e:
-        logging.warning(f"[ImportUser] failed but ignored: {e}")
+        logger.error(f"Subscription/order error: {e}")
+        await message.reply("❌ Не удалось оформить подписку. Попробуйте позже.")
 
-
-def gc_get_contact_uuid(email: str) -> str:
-    """
-    Ищет контакт по e-mail и возвращает его UUID.
-    """
-    url = f"https://{GC_DOMAIN}/pl/api/contact.search"
-    headers = {"X-API-KEY": API_KEY}
-
-    response = requests.get(url, params={"email": email}, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-    logging.info(f"[GetContactUUID] response: {data}")
-
-    contacts = data.get("response") or data.get("contacts") or []
-    if not contacts:
-        raise Exception(f"No contacts found for email={email}: {data}")
-
-    uuid = contacts[0].get("uuid")
-    if not uuid:
-        raise Exception(f"Contact entry missing uuid: {contacts[0]}")
-    return uuid
-
-
-def gc_create_order(contact_uuid: str, course_uuid: str, recurrent: bool = False) -> str:
-    """
-    Оформляет заказ через Order API (/pl/api/order.add) и возвращает ссылку на оплату.
-    """
-    url = f"https://{GC_DOMAIN}/pl/api/order.add"
-    headers = {"X-API-KEY": API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "course_uuid": course_uuid,
-        "contact_uuid": contact_uuid,
-        "recurrent": recurrent
-    }
-
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-    logging.info(f"[CreateOrder] response: {data}")
-
-    link = data.get("order", {}).get("payment_link")
-    if not link:
-        raise Exception(f"Payment link missing: {data}")
-    return link
+# ─── Запуск Polling ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
