@@ -79,7 +79,12 @@ async def name_handler(message: types.Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Subscription error: {e}")
         await message.reply("Не удалось оформить подписку, попробуйте позже.")
+        
+async def on_startup(dp):
+    # Удаляем все Webhook-методы, чтобы избежать конфликта с Polling
+    await bot.delete_webhook()
 
-if __name__=="__main__":
-    executor.start_polling(dp, skip_updates=True)
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+
 
