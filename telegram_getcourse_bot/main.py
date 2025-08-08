@@ -1,9 +1,16 @@
 import os
+import logging
 from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, CommandHandler
 from getcourse import create_user, create_order
 
-# Загружаем переменные окружения из .env
+# Настройка логирования
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+
+# Загружаем переменные окружения
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -22,15 +29,19 @@ async def register(update, context):
         )
     email, first, last = args
     res = create_user(email, first, last)
-
-    # Проверяем ответ API
-    if res.get("success") == "true" and res["result"].get("success") == "true":
+    logging.info("create_user response: %s", res)
+    
+    success = res.get("success")
+    result = res.get("result", {})
+    user_ok = result.get("success")
+    
+    # Учитываем, что API может возвращать строки или булевы значения
+    if success in (True, "true") and user_ok in (True, "true"):
         await update.message.reply_text("Пользователь успешно создан.")
     else:
-        err = res["result"].get("error_message", "Неизвестная ошибка")
-        await update.message.reply_text(
-            f"Ошибка при создании пользователя: {err}"
-        )
+        # Извлекаем сообщение об ошибке
+        err = result.get("error_message") or res.get("error") or res.get("description") or "Неизвестная ошибка"
+        await update.message.reply_text(f"Ошибка при создании пользователя: {err}")
 
 async def order(update, context):
     """Обработчик команды /order email код_продукта цена"""
@@ -39,31 +50,33 @@ async def order(update, context):
         return await update.message.reply_text(
             "Использование: /order email код_продукта цена"
         )
-    email, offer_code, cost = args
+    email, offer_code, cost_str = args
     try:
-        cost = float(cost)
+        cost = float(cost_str)
     except ValueError:
         return await update.message.reply_text(
             "Ошибка: цена должна быть числом."
         )
-
+    
     res = create_order(email, offer_code, cost)
-
-    # Проверяем ответ API
-    if res.get("success") == "true" and res["result"].get("success") == "true":
-        link = res["result"].get("payment_link")
+    logging.info("create_order response: %s", res)
+    
+    success = res.get("success")
+    result = res.get("result", {})
+    deal_ok = result.get("success")
+    
+    if success in (True, "true") and deal_ok in (True, "true"):
+        link = result.get("payment_link") or ""
         await update.message.reply_text(f"Ссылка на оплату: {link}")
     else:
-        err = res["result"].get("error_message", "Неизвестная ошибка")
-        await update.message.reply_text(
-            f"Ошибка при создании заказа: {err}"
-        )
+        err = result.get("error_message") or res.get("error") or res.get("description") or "Неизвестная ошибка"
+        await update.message.reply_text(f"Ошибка при создании заказа: {err}")
 
 if __name__ == "__main__":
-    # Инициализируем бота и регистрируем обработчики
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("register", register))
     app.add_handler(CommandHandler("order", order))
-    # Запускаем polling
+    logging.info("Bot started, polling for updates…")
     app.run_polling()
+
